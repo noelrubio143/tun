@@ -1,0 +1,86 @@
+name: Build libvbxraytun2socks.so
+
+on:
+  workflow_dispatch:
+    inputs:
+      badvpn_repo:
+        description: "BadVPN fork (owner/repo) that has --sock-path and --enable-udprelay"
+        default: "shadowsocks/badvpn"
+      badvpn_ref:
+        description: "Branch, tag or commit (empty = default branch)"
+        default: ""
+      api_level:
+        description: "Android API level"
+        default: "21"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a]
+    steps:
+      - name: Checkout BadVPN
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.badvpn_repo }}
+          ref: ${{ inputs.badvpn_ref }}
+          submodules: recursive
+          path: badvpn
+
+      - name: Configure and build (CMake + Android NDK)
+        run: |
+          set -euo pipefail
+          NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_ROOT:-}}"
+          test -d "$NDK" || { echo "Android NDK not found on runner"; exit 1; }
+          echo "NDK=$NDK" >> "$GITHUB_ENV"
+          cmake -S badvpn -B "out/${{ matrix.abi }}" -G "Unix Makefiles" \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI="${{ matrix.abi }}" \
+            -DANDROID_PLATFORM="android-${{ inputs.api_level }}" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXE_LINKER_FLAGS="-pie" \
+            -DBUILD_NOTHING_BY_DEFAULT=1 \
+            -DBUILD_TUN2SOCKS=1
+          cmake --build "out/${{ matrix.abi }}" -j"$(nproc)"
+
+      - name: Locate, strip and rename
+        run: |
+          set -euo pipefail
+          BIN="$(find "out/${{ matrix.abi }}" -type f \( -name 'badvpn-tun2socks' -o -name 'tun2socks' \) | head -n1)"
+          test -n "$BIN" || { echo "tun2socks binary not found"; find "out/${{ matrix.abi }}" -type f -perm -u+x | head -50; exit 1; }
+          DEST="dist/jniLibs/${{ matrix.abi }}"
+          mkdir -p "$DEST"
+          cp "$BIN" "$DEST/libvbxraytun2socks.so"
+          "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" "$DEST/libvbxraytun2socks.so"
+          file "$DEST/libvbxraytun2socks.so"
+          sha256sum "$DEST/libvbxraytun2socks.so"
+
+      - name: Check that the app's flags exist in the binary
+        run: |
+          set -euo pipefail
+          F="dist/jniLibs/${{ matrix.abi }}/libvbxraytun2socks.so"
+          for flag in --sock-path --enable-udprelay; do
+            if grep -aq -- "$flag" "$F"; then echo "OK: $flag"; else echo "MISSING: $flag (wrong BadVPN fork)"; exit 1; fi
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vbxray-${{ matrix.abi }}
+          path: dist/
+
+  combine:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: vbxray-*
+          merge-multiple: true
+          path: out
+      - run: find out -type f | sort
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jniLibs-vbxraytun2socks
+          path: out/
