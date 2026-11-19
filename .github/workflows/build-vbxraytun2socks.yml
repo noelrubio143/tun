@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       badvpn_repo:
-        description: "BadVPN fork (owner/repo) that has --sock-path and --enable-udprelay"
+        description: "BadVPN fork (owner/repo)"
         default: "shadowsocks/badvpn"
       badvpn_ref:
-        description: "Branch, tag or commit (empty = default branch)"
-        default: ""
+        description: "Branch, tag or commit"
+        default: "shadowsocks-android"
       api_level:
         description: "Android API level"
         default: "21"
@@ -19,7 +19,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        abi: [arm64-v8a, armeabi-v7a]
+        include:
+          - abi: arm64-v8a
+            triple: aarch64-linux-android
+          - abi: armeabi-v7a
+            triple: armv7a-linux-androideabi
     steps:
       - name: Checkout BadVPN
         uses: actions/checkout@v4
@@ -29,19 +33,40 @@ jobs:
           submodules: recursive
           path: badvpn
 
-      - name: Configure and build (CMake + Android NDK)
+      - name: Checkout libancillary
+        uses: actions/checkout@v4
+        with:
+          repository: shadowsocks/libancillary
+          ref: shadowsocks-android
+          path: libancillary
+
+      - name: Build libancillary (static)
         run: |
           set -euo pipefail
           NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_ROOT:-}}"
           test -d "$NDK" || { echo "Android NDK not found on runner"; exit 1; }
           echo "NDK=$NDK" >> "$GITHUB_ENV"
-          DEFS="-DBADVPN_LINUX -DBADVPN_BREACTOR_BADVPN -D_GNU_SOURCE -DBADVPN_THREADWORK_USE_PTHREAD -DBADVPN_LITTLE_ENDIAN -DBADVPN_THREAD_SAFE=1 -DBADVPN_USE_SELFPIPE -DBADVPN_USE_POLL"
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CC="$BIN/${{ matrix.triple }}${{ inputs.api_level }}-clang"
+          mkdir -p anc-out
+          cd libancillary
+          "$CC" -c -O2 -fPIC -I. fd_recv.c fd_send.c
+          "$BIN/llvm-ar" rcs "$GITHUB_WORKSPACE/anc-out/libancillary.a" fd_recv.o fd_send.o
+          ls -la "$GITHUB_WORKSPACE/anc-out"
+
+      - name: Configure and build (CMake + Android NDK)
+        run: |
+          set -euo pipefail
+          ANC="$GITHUB_WORKSPACE/libancillary"
+          ANCLIB="$GITHUB_WORKSPACE/anc-out/libancillary.a"
+          DEFS="-I$ANC -DBADVPN_LINUX -DBADVPN_BREACTOR_BADVPN -D_GNU_SOURCE -DBADVPN_THREADWORK_USE_PTHREAD -DBADVPN_LITTLE_ENDIAN -DBADVPN_THREAD_SAFE=1 -DBADVPN_USE_SELFPIPE -DBADVPN_USE_POLL"
           cmake -S badvpn -B "out/${{ matrix.abi }}" -G "Unix Makefiles" \
             -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI="${{ matrix.abi }}" \
             -DANDROID_PLATFORM="android-${{ inputs.api_level }}" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_FLAGS="$DEFS" \
+            -DCMAKE_C_STANDARD_LIBRARIES="$ANCLIB -latomic -lm" \
             -DCMAKE_EXE_LINKER_FLAGS="-pie" \
             -DBUILD_NOTHING_BY_DEFAULT=1 \
             -DBUILD_TUN2SOCKS=1 \
