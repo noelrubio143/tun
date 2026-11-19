@@ -40,7 +40,7 @@ jobs:
           ref: shadowsocks-android
           path: libancillary
 
-      - name: Build libancillary (static)
+      - name: Build libancillary and stub libs
         run: |
           set -euo pipefail
           NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_ROOT:-}}"
@@ -48,17 +48,22 @@ jobs:
           echo "NDK=$NDK" >> "$GITHUB_ENV"
           BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
           CC="$BIN/${{ matrix.triple }}${{ inputs.api_level }}-clang"
-          mkdir -p anc-out
-          cd libancillary
-          "$CC" -c -O2 -fPIC -I. fd_recv.c fd_send.c
-          "$BIN/llvm-ar" rcs "$GITHUB_WORKSPACE/anc-out/libancillary.a" fd_recv.o fd_send.o
-          ls -la "$GITHUB_WORKSPACE/anc-out"
+          mkdir -p anc-out stubs
+          (cd libancillary && "$CC" -c -O2 -fPIC -I. fd_recv.c fd_send.c \
+            && "$BIN/llvm-ar" rcs "$GITHUB_WORKSPACE/anc-out/libancillary.a" fd_recv.o fd_send.o)
+          echo "int vb_stub;" > stubs/empty.c
+          "$CC" -c stubs/empty.c -o stubs/empty.o
+          for l in rt pthread; do
+            "$BIN/llvm-ar" rcs "stubs/lib$l.a" stubs/empty.o
+          done
+          ls -la anc-out stubs
 
       - name: Configure and build (CMake + Android NDK)
         run: |
           set -euo pipefail
           ANC="$GITHUB_WORKSPACE/libancillary"
           ANCLIB="$GITHUB_WORKSPACE/anc-out/libancillary.a"
+          STUBS="$GITHUB_WORKSPACE/stubs"
           DEFS="-I$ANC -DBADVPN_LINUX -DBADVPN_BREACTOR_BADVPN -D_GNU_SOURCE -DBADVPN_THREADWORK_USE_PTHREAD -DBADVPN_LITTLE_ENDIAN -DBADVPN_THREAD_SAFE=1 -DBADVPN_USE_SELFPIPE -DBADVPN_USE_POLL"
           cmake -S badvpn -B "out/${{ matrix.abi }}" -G "Unix Makefiles" \
             -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
@@ -67,7 +72,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_FLAGS="$DEFS" \
             -DCMAKE_C_STANDARD_LIBRARIES="$ANCLIB -latomic -lm" \
-            -DCMAKE_EXE_LINKER_FLAGS="-pie" \
+            -DCMAKE_EXE_LINKER_FLAGS="-pie -L$STUBS" \
             -DBUILD_NOTHING_BY_DEFAULT=1 \
             -DBUILD_TUN2SOCKS=1 \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5
